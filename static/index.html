@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>My WebServer — Phase 2</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            max-width: 720px;
+            margin: 60px auto;
+            padding: 0 20px;
+            background: #0d1117;
+            color: #c9d1d9;
+        }
+        h1 {
+            color: #58a6ff;
+            border-bottom: 2px solid #30363d;
+            padding-bottom: 12px;
+        }
+        .status { color: #3fb950; font-weight: bold; }
+        code {
+            background: #161b22;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .info {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 20px 0;
+        }
+        .feature-list {
+            list-style: none;
+            padding: 0;
+        }
+        .feature-list li {
+            padding: 6px 0;
+        }
+        .feature-list li::before {
+            content: "✅ ";
+        }
+        pre {
+            background: #161b22;
+            border-radius: 6px;
+            padding: 12px 16px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 My WebServer</h1>
+    <p class="status">● 服务器运行中 — Phase 2: HTTP 静态文件服务器</p>
+
+    <div class="info">
+        <p>这是一个练习项目，正在逐步构建一个高并发 C++ Web 服务器。</p>
+        <p>当前阶段：<strong>HTTP/1.1 静态文件服务器</strong></p>
+        <p>部署平台：<strong>NVIDIA Jetson Xavier NX (ARM64)</strong></p>
+    </div>
+
+    <h2>已实现功能</h2>
+    <ul class="feature-list">
+        <li>HTTP/1.1 协议解析（状态机：请求行 → 头部 → 正文）</li>
+        <li>mmap 零拷贝文件映射</li>
+        <li>writev 分散/聚集 I/O</li>
+        <li>长连接 keep-alive 支持</li>
+        <li>MIME 类型自动识别</li>
+        <li>错误页面（400 / 403 / 404 / 500）</li>
+        <li>LT / ET 触发模式切换</li>
+    </ul>
+
+    <h2>测试命令</h2>
+    <pre><code># 基本请求
+curl -v http://localhost:9006/
+
+# 查看响应头（MIME 类型、keep-alive）
+curl -v http://localhost:9006/index.html
+
+# 404 测试
+curl -v http://localhost:9006/nonexistent.html
+
+# keep-alive 测试
+curl -v -H "Connection: keep-alive" http://localhost:9006/</code></pre>
+
+    <p style="margin-top:40px; color:#484f58; font-size:0.85em;">
+        Built with ♥ on Jetson Xavier NX
+    </p>
+</body>
+</html>

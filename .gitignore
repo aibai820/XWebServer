@@ -1,0 +1,12 @@
+# 过滤编译输出目录
+build/
+
+# 过滤可执行文件（根据你 build.sh 或 CMake 生成的实际名字调整）
+XWebServer
+*.out
+*.exe
+
+# 过滤缓存和日志
+*.log
+.vscode/
+.directory
