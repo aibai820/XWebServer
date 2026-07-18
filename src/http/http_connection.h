@@ -106,6 +106,10 @@ public:
     // @return true=成功, false=连接断开或出错
     bool read_once();
 
+    // HTTP 请求处理入口
+    // 主状态机：process_read() → process_write() → 注册 EPOLLOUT
+    void process();
+    
     // 非阻塞写：使用 writev 发送 HTTP 响应头和文件内容
     // @return true=写完成（或等待 EPOLLOUT）, false=连接应关闭
     bool write();

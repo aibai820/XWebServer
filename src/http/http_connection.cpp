@@ -362,6 +362,478 @@ HttpConnection::HTTP_CODE HttpConnection::parse_headers(char* text)
     // 空行表示头部结束
     if (text[0] == '\0')
     {
+        // 如果有Content-Length，还需要读正文
+        if (content_length_ != 0)
+        {
+            check_state_ = CHECK_STATE_CONTENT;
+            return NO_REQUEST;
+        }
         
+        // 否则请求完整
+        return GET_REQUEST;
     }
+    // Connection 头部
+    else if (strncasecmp(text, "Connection:", 11) == 0)
+    {
+        text += 11;
+        text += strspn(text, " \t");
+        if (strcasecmp(text, "keep-alive") == 0)
+        {
+            linger_ = true;
+        }
+    }
+    // Content-Length 头部
+    else if (strncasecmp(text, "Content-Length:", 15) == 0)
+    {
+        text += 15;
+        text += strspn(text, " \t");
+        content_length_ = atol(text);
+    }
+    // Host 头部
+    else if (strncasecmp(text, "Host:", 5) == 0) {
+        text += 5;
+        text += strspn(text, " \t");
+        host_ = text;
+    }
+    // 其他头部忽略（阶段 4 会记录日志）
+    else {
+        // printf("[头部] 未知: %s\n", text);
+    }
+
+    return NO_REQUEST;
+}
+
+// ============================================================
+// 解析 HTTP 正文（POST 请求的消息体）
+// 阶段 2 不做详细解析，只判断是否收取完
+// 阶段 4 会实现完整的 CGI 处理
+// ============================================================
+HttpConnection::HTTP_CODE HttpConnection::parse_content(char* text)
+{
+    // 判断正文是否完整接收
+    if (read_idx_ >= (content_length_ + checked_idx_))
+    {
+        text[content_length_] = '\0'; // 截断正文
+        return GET_REQUEST;
+    }
+    return NO_REQUEST;
+}
+
+// ============================================================
+// 主状态机：process_read()
+//
+// 驱动流程：
+//   while (能解析出行) {
+//       根据当前状态 → 调用对应解析函数
+//       收到完整请求 → do_request()
+//       协议错误     → BAD_REQUEST
+//   }
+//   return NO_REQUEST（数据不完整，等下次 epoll 通知）
+// ============================================================
+HttpConnection::HTTP_CODE HttpConnection::process_read()
+{
+    LINE_STATUS line_status = LINE_OK;
+    HTTP_CODE   ret         = NO_REQUEST;
+    char*       text        = nullptr;
+
+    // 循环条件说明：
+    // - CONTENT 状态时不需要 parse_line()，直接处理正文
+    // - 其他状态需要 parse_line() 先取出一行
+    while ((check_state_ == CHECK_STATE_CONTENT && line_status == LINE_OK) ||
+           ((line_status = parse_line()) == LINE_OK))
+    {
+        text = get_line();
+        start_line_ = checked_idx_;
+
+        switch (check_state_)
+        {
+        case CHECK_STATE_REQUESTLINE:
+        {
+            ret = parse_request_line(text);
+            if (ret == BAD_REQUEST)
+            {
+                return BAD_REQUEST;
+            }
+            break;
+        }
+        case CHECK_STATE_HEADER:
+        {
+            ret = parse_headers(text);
+            if (ret == BAD_REQUEST)
+            {
+                return BAD_REQUEST;
+            }else if (ret == GET_REQUEST)
+            {
+                return do_request();
+            }
+            break;
+        }
+        case CHECK_STATE_CONTENT:
+        {
+            ret = parse_content(text);
+            if (ret == GET_REQUEST)
+            {
+                return do_request();
+            }
+            line_status = LINE_OPEN; // 正文还没读完
+            break;
+        }
+        
+        default:
+            return INTERNAL_ERROR;
+        }
+    }
+    
+    return NO_REQUEST;
+}
+
+// ============================================================
+// URL 路由 + 文件映射
+//
+// 1. 拼接 doc_root + url → 真实文件路径
+// 2. 默认 "/" → "/index.html"
+// 3. stat() 判断文件是否存在、是否有权限、是否为目录
+// 4. open() + mmap() 零拷贝映射到内存
+// ============================================================
+HttpConnection::HTTP_CODE HttpConnection::do_request()
+{
+    // 构建实际文件路径
+    strncpy(real_file_, doc_root_, FILENAME_LEN - 1);
+    int root_len = strlen(doc_root_);
+
+    // 默认首页：/ → /index.html
+    const char* target_url = url_;
+    if (strlen(target_url) == 1 && target_url[0] == '/')
+    {
+        target_url = "/index.html";
+    }
+
+    // 安全拼接（防止缓冲区溢出）
+    strncpy(real_file_ + root_len, target_url,
+            FILENAME_LEN - root_len - 1);
+    real_file_[FILENAME_LEN - 1] = '\0';
+
+    printf("[请求] fd=%d URL: %s → 文件: %s\n", sockfd_, target_url, real_file_);
+
+    // stat() 获取文件信息
+    if (stat(real_file_, &file_stat_) < 0) {
+        return NO_RESOURCE;  // 文件不存在 → 404
+    }
+    
+    // 检查是否有读取权限
+    if (!(file_stat_.st_mode & S_IROTH)) {
+        return FORBIDDEN_REQUEST;  // 无权限 → 403
+    }
+    
+    // 目录不允许直接访问
+    if (S_ISDIR(file_stat_.st_mode)) {
+        return BAD_REQUEST;  // 是目录 → 400
+    }
+
+    // mmap 零拷贝：把文件映射到内存
+    // MAP_PRIVATE: 写时复制（虽然这里是只读）
+    int fd = open(real_file_, O_RDONLY);
+    if (fd < 0)
+    {
+        return INTERNAL_ERROR;
+    }
+    file_addr_ = (char*)mmap(nullptr, file_stat_.st_size,
+                             PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd); // mmap 后可以立即关闭文件描述符
+
+    if (file_addr_ == MAP_FAILED)
+    {
+        file_addr_ = nullptr;
+        return INTERNAL_ERROR;
+    }
+    
+    return FILE_REQUEST;
+}
+
+// ============================================================
+// 释放 mmap 映射
+// ============================================================
+void HttpConnection::unmap()
+{
+    if(file_addr_)
+    {
+        munmap(file_addr_, file_stat_.st_size);
+        file_addr_ = nullptr;
+    }
+}
+
+// ============================================================
+// 构建 HTTP 响应
+//
+// 根据 process_read() 的返回值，组装 HTTP 响应：
+//   200: 状态行 + Content-Type + Content-Length + Connection + 空行 + 文件内容
+//   400/403/404/500: 状态行 + Content-Type + Content-Length + 空行 + 错误 HTML
+//
+// 对于 200 响应，使用 writev 将 响应头和文件内容 一起发送：
+//   iv_[0] → write_buf_ (响应头)
+//   iv_[1] → file_addr_ (mmap 的文件内容)
+// ============================================================
+bool HttpConnection::process_write(HTTP_CODE ret)
+{
+    switch (ret)
+    // ---- 500 Internal Server Error ----
+    {
+    case INTERNAL_ERROR:
+    {
+        add_status_line(500, error_500_title);
+        add_headers(strlen(error_500_form));
+        if (!add_content(error_500_form))
+        {
+            return false;
+        }
+        break;
+    }
+    // ---- 400 Bad Request ----
+    case BAD_REQUEST:
+    {
+        add_status_line(400, error_400_title);
+        add_headers(strlen(error_400_form));
+        if (!add_content(error_400_form))
+        {
+            return false;
+        }
+        break;
+    }
+    // ---- 404 Not Found ----
+    case  NO_RESOURCE:
+    {
+        add_status_line(404, error_404_title);
+        add_headers(strlen(error_404_form));
+        if (!add_content(error_404_form))
+        {
+            return false;
+        }
+        break;
+    }
+    // ---- 403 Forbidden ----
+    case FORBIDDEN_REQUEST:
+    {
+        add_status_line(403, error_403_title);
+        add_headers(strlen(error_403_form));
+        if (!add_content(error_403_form))
+        {
+            return false;
+        }
+        break;
+    }
+    // ---- 200 OK (文件请求) ----
+    case FILE_REQUEST:
+    {
+        add_status_line(200, ok_200_title);
+        if (file_stat_.st_size != 0)
+        {
+            // 文件非空：响应头 + 文件内容
+            add_content_type();
+            add_headers(file_stat_.st_size);
+
+            // 设置 writev 的 iovec
+            iv_[0].iov_base = write_buf_;
+            iv_[0].iov_len = write_idx_;
+            iv_[1].iov_base = file_addr_;
+            iv_[1].iov_len = file_stat_.st_size;
+            iv_count_ = 2;
+            bytes_to_send_ = write_idx_ + file_stat_.st_size;
+            return true;
+        }else{
+            // 空文件：只返回基本的HTML页面
+            const char* ok_string = "<html><body></body></html>";
+            add_headers(strlen(ok_string));
+            if (!add_content(ok_string))
+            {
+                return false;
+            }
+        }
+        break;
+    }
+    default:
+        return false;
+    }
+
+    // 错误响应和空文件响应只有响应头（没有 mmap 文件）
+    iv_[0].iov_base = write_buf_;
+    iv_[0].iov_len = write_idx_;
+    iv_count_ = 1;
+    bytes_to_send_ = write_idx_;
+    return true;
+}
+
+// ============================================================
+// process(): HTTP 请求处理入口
+//
+// 1. 调用 process_read() 解析请求
+// 2. 如果请求不完整 → 重新注册 EPOLLIN，等待更多数据
+// 3. 调用 process_write() 构建响应
+// 4. 重新注册 EPOLLOUT，由 write() 实际发送
+// ============================================================
+void HttpConnection::process()
+{
+    HTTP_CODE read_ret = process_read();
+
+    // 请求不完整，继续监听读事件
+    if (read_ret == NO_REQUEST) {
+        modify_fd_in_epoll(epoll_fd_, sockfd_, EPOLLIN, trig_mode_);
+        return;
+    }
+  
+    // 构建 HTTP 响应
+    bool write_ret = process_write(read_ret);
+    if (!write_ret) {
+        // 响应构建失败，关闭连接
+        close_conn();
+        return;
+    }
+    
+    // 注册写事件，由 write() 函数实际发送数据
+    modify_fd_in_epoll(epoll_fd_, sockfd_, EPOLLOUT, trig_mode_);
+    
+}
+
+// ============================================================
+// write(): 非阻塞写
+//
+// 使用 writev() 一次系统调用发送 响应头 + 文件内容
+// 如果发送缓冲区满了（EAGAIN），重新注册 EPOLLOUT 等待下次可写
+// 如果发送完成且 keep-alive → 重置状态，准备处理下一个请求
+// 如果发送完成但 close   → 返回 false，由调用方关闭连接
+//
+// writev 的 iovec 调整逻辑：
+//   bytes_have_send 累加已发送字节
+//   当发送量超过 iv_[0].iov_len（响应头发完了）→ 调整 iv_[1] 继续发文件
+//   当发送量还不到 iv_[0].iov_len → 调整 iv_[0] 继续发响应头
+// ============================================================
+bool HttpConnection::write()
+{
+    int temp = 0;
+
+    // 没有待发送数据（不应出现的情况）
+    if (bytes_to_send_ == 0)
+    {
+        modify_fd_in_epoll(epoll_fd_, sockfd_, EPOLLIN, trig_mode_);
+        init_request();
+        return true;
+    }
+
+    // 循环发送，直到缓冲区满或全部发完
+    while (true)
+    {
+        temp = writev(sockfd_, iv_, iv_count_);
+
+        if (temp < 0)
+        {
+            // 发送缓冲区满了，等待EPOLLOUT通知
+            if (errno == EAGAIN)
+            {
+                modify_fd_in_epoll(epoll_fd_, sockfd_, EPOLLOUT, trig_mode_);
+                 return true;
+            }
+            // 真正的错误
+            unmap();
+            return false;
+        }
+
+        bytes_have_send_ += temp;
+        bytes_to_send_ -= temp;
+
+        // 调整 iovec偏移
+        if (bytes_have_send_ >= static_cast<int>(iv_[0].iov_len))
+        {
+            // 响应头已经发完，正在发文件内容
+            iv_[0].iov_len = 0;
+            iv_[1].iov_base = file_addr_ + (bytes_have_send_ - write_idx_);
+            iv_[1].iov_len = bytes_to_send_;
+        }else{
+            // 响应头还没发完
+            iv_[0].iov_base = write_buf_ + bytes_have_send_;
+            iv_[0].iov_len = iv_[0].iov_len - temp;
+        }
+
+        // 全部发送完毕
+        if (bytes_to_send_ <= 0)
+        {
+            unmap();
+
+            // 重新监听读事件
+            modify_fd_in_epoll(epoll_fd_, sockfd_, EPOLLIN, trig_mode_);
+
+            // keep-alive:重置状态，等待下一个请求
+            if (linger_)
+            {
+                init_request();
+                return true;
+            }else{
+                // close:通知调用方法关闭连接
+                return false;
+            }
+        }
+    }  
+}
+
+// ============================================================
+// 响应构建辅助函数
+// ============================================================
+
+// 向写缓冲区追加格式化字符串
+bool HttpConnection::add_response(const char* format, ...)
+{
+    if (write_idx_ >= WRITE_BUFFER_SIZE)
+    {
+        return false;
+    }
+
+    va_list arg_list;
+    va_start(arg_list, format);
+    int len = vsnprintf(write_buf_ + write_idx_,
+                        WRITE_BUFFER_SIZE - 1 - write_idx_,
+                        format, arg_list);
+    va_end(arg_list);
+
+    if (len >= (WRITE_BUFFER_SIZE - 1 -write_idx_))
+    {
+        return false; // 写缓冲区溢出
+    }
+    write_idx_ += len;
+    return true;
+}
+
+// 状态行：HTTP/1.1 200 OK\r\n
+bool HttpConnection::add_status_line(int status, const char* title) {
+    return add_response("%s %d %s\r\n", "HTTP/1.1", status, title);
+}
+
+// 响应头部：Content-Length + Connection + 空行
+bool HttpConnection::add_headers(int content_length) {
+    return add_content_length(content_length)
+        && add_linger()
+        && add_blank_line();
+}
+
+// Content-Type 头部
+bool HttpConnection::add_content_type() {
+    return add_response("Content-Type:%s\r\n", get_mime_type(real_file_));
+}
+
+// Content-Length 头部
+bool HttpConnection::add_content_length(int content_length) {
+    return add_response("Content-Length:%d\r\n", content_length);
+}
+
+// Connection 头部（keep-alive 或 close）
+bool HttpConnection::add_linger() {
+    return add_response("Connection:%s\r\n",
+                        linger_ ? "keep-alive" : "close");
+}
+
+// 空行（头部与正文的分隔）
+bool HttpConnection::add_blank_line() {
+    return add_response("%s", "\r\n");
+}
+
+// 正文内容
+bool HttpConnection::add_content(const char* content) {
+    return add_response("%s", content);
 }
