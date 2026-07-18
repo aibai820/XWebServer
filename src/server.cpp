@@ -15,6 +15,15 @@
  *   3. EPOLLRDHUP 是 Linux 2.6.17 引入的标志
  *      - 对端关闭连接（发送 FIN）时触发
  *      - 比传统的 recv()==0 判断更优雅
+ *
+ * 阶段 2 新增：
+ *   4. writev 分散/聚集 I/O
+ *      - 一次系统调用发送多个不连续的内存块
+ *      - 避免 HTTP 响应头复制到文件缓冲区（或反之）
+ *
+ *   5. mmap 零拷贝
+ *      - 文件直接映射到用户空间内存，内核态 copy 一次到 page cache
+ *      - 比 read() + write() 少一次内核→用户态的拷贝
  */
 
 #include "server.h"
@@ -38,10 +47,19 @@ WebServer::~WebServer() {
 // ============================================================
 // 初始化参数
 // ============================================================
-void WebServer::init(int port)
+void WebServer::init(int port, const char* doc_root, int trig_mode)
 {
     port_ = port;
-    printf("[初始化] 端口：%d\n",port);
+    trig_mode_ = trig_mode;
+
+    // 安全拷贝文档根目录
+    strncpy(doc_root_, doc_root, sizeof(doc_root_) - 1);
+    doc_root_[sizeof(doc_root_) - 1] = '\0';
+
+
+    const char* mode_str = (trig_mode_ == ET_MODE) ? "ET" : "LT";
+    printf("[初始化] 端口: %d, 根目录: %s, 触发模式: %s\n",
+           port_, doc_root_, mode_str);
 }
 
 // ============================================================
@@ -66,9 +84,9 @@ void WebServer::event_listen()
     // ---- 第 3 步: bind() ----
     // 把 socket 绑定到特定 IP:Port
     struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    memset(&address, 0, sizeof(address));             // IPv4
+    address.sin_family = AF_INET;                     // 监听所有网卡（0.0.0.0）
+    address.sin_addr.s_addr = htonl(INADDR_ANY);      // 主机字节序 → 网络字节序
     address.sin_port = htons(port_);
 
     int ret = bind(listenfd_, (struct sockaddr*)&address, sizeof(address));
@@ -86,17 +104,17 @@ void WebServer::event_listen()
     assert(epollfd_ != -1);
     
     // ---- 第 6 步: epoll_ctl() 注册 listenfd ----
-    // 监听 socket 用 LT 模式（阶段 1 全部 LT，安全简单）
-    add_fd_to_epoll(epollfd_, listenfd_, false, false);
+    // 监听 socket 用 LT 模式（listenfd 不需要 ET，accept 每次只取一个连接）
+    add_fd_to_epoll(epollfd_, listenfd_, false, LT_MODE);
 
     // 设置全局 epollfd，HttpConnection 的静态方法会用到
     HttpConnection::epoll_fd_ = epollfd_;
 
-    printf("[就绪] 服务器监听在 http://0.0.0.0:%d  (epoll fd=%d, 模式: LT)\n",
-            port_, epollfd_);
+    const char* mode_str = (trig_mode_ == ET_MODE) ? "ET" : "LT"; 
+    printf("[就绪] 服务器监听在 http://0.0.0.0:%d  (epoll fd=%d, 连接模式: %s)\n",
+           port_, epollfd_, mode_str);
     printf("[提示] 用浏览器访问 http://localhost:%d 测试\n", port_);
     printf("[提示] 或者用 curl http://localhost:%d\n", port_);
-
 }
 
 // ============================================================
@@ -202,8 +220,8 @@ void WebServer::handle_new_connection()
         return;
     }
 
-    // 初始化连接对象
-    users_[connfd].init(connfd, client_addr);
+    // 初始化连接对象（传入文档根目录和触发模式）
+    users_[connfd].init(connfd, client_addr, doc_root_, trig_mode_);
 
 }
 
@@ -215,20 +233,16 @@ void WebServer::handle_read(int sockfd)
     HttpConnection& conn = users_[sockfd];
 
     // 读数据
-    if (!conn.read_once())
-    {
+    if (!conn.read_once()) {
         // 读取失败 → 客户端断开或出错
         handle_close(sockfd);
         return;
     }
 
-    // 阶段 1: echo 回去
-    // 阶段 2: 这里会替换为 process() → process_read() → process_write()
-    if (!conn.write_back())
-    {
-        handle_close(sockfd);
-        return;
-    } 
+    // 阶段 2: HTTP 请求处理
+    // process() 内部会 process_read() → process_write() → modify_fd(EPOLLOUT)
+    // 然后由 handle_write() → write() 实际发送数据
+    conn.process();
 }
 
 // ============================================================
@@ -236,9 +250,16 @@ void WebServer::handle_read(int sockfd)
 // ============================================================
 void WebServer::handle_write(int sockfd)
 {
-    // 阶段 1: echo 在 read 里同步写完了，不需要处理 EPOLLOUT
-    // 阶段 2: 当 writev 返回 EAGAIN 时重新注册 EPOLLOUT，在这里续传
-    printf("[可写] fd=%d（暂未处理）\n", sockfd);
+    HttpConnection& conn = users_[sockfd];
+    // write() 返回 false 表示：
+    //   1. 发送出错 → 关闭连接
+    //   2. 发送完毕且 Connection: close → 关闭连接
+    if (!conn.write()) {
+        handle_close(sockfd);
+    }
+    // write() 返回 true 表示：
+    //   1. EAGAIN（缓冲区满）→ 已重新注册 EPOLLOUT，等待下次触发
+    //   2. 发送完毕且 keep-alive → 已重新注册 EPOLLIN + 重置状态，等待下一个请求
 }
 
 // ============================================================
