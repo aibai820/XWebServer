@@ -55,6 +55,7 @@ set(HEADERS
     src/server.h
     src/http/http_connection.h
     src/sync/locker.h
+    src/pool/threadpool.h
 )
 
 # ============================================================

@@ -2,9 +2,9 @@
  * @file    http_connection.h
  * @brief   HTTP 连接处理类
  *
- * 阶段 1：简单的 echo——收到什么返回什么
- * 阶段 2（当前）：完整的 HTTP/1.1 协议解析 + 静态文件服务
- * 阶段 3：集成线程池，实现 Reactor/Proactor 模式
+ * 阶段 1（已完成）：简单的 echo——收到什么返回什么
+ * 阶段 2（已完成）：完整的 HTTP/1.1 协议解析 + 静态文件服务
+ * 阶段 3（当前）：集成线程池，实现 Reactor/Proactor 模式
  *
  * 关键设计：
  *   - 每个连接有一个独立对象，状态全部自包含
@@ -109,7 +109,7 @@ public:
     // HTTP 请求处理入口
     // 主状态机：process_read() → process_write() → 注册 EPOLLOUT
     void process();
-    
+
     // 非阻塞写：使用 writev 发送 HTTP 响应头和文件内容
     // @return true=写完成（或等待 EPOLLOUT）, false=连接应关闭
     bool write();
@@ -123,6 +123,13 @@ public:
     // 访问器
     int sockfd() const { return sockfd_; }
     const sockaddr_in& address() const{ return address_; }
+
+    // ==========================================================
+    // 线程池协同字段（阶段 3）
+    // ==========================================================
+    int m_state = 0;      // 任务类型：0=读事件, 1=写事件（Reactor 模式使用）
+    int improv = 0;       // 同步标志：工作线程处理完毕后设为 1，主线程据此判断是否完成
+    int timer_flag = 0;   // 定时器标志：1=连接已断开/出错，需要清理（阶段 4 使用）
 
 private:
     // ---- 内部辅助：重置请求状态 ----

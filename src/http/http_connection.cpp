@@ -2,9 +2,9 @@
  * @file    http_connection.h
  * @brief   HTTP 连接处理类
  *
- * 阶段 1:简单的 echo——收到什么返回什么
- * 阶段 2（当前）：实现完整的 HTTP/1.1 协议解析和静态文件服务
- * 阶段 3：集成线程池，实现 Reactor/Proactor 模式
+ * 阶段 1(已完成):简单的 echo——收到什么返回什么
+ * 阶段 2(已完成）：实现完整的 HTTP/1.1 协议解析和静态文件服务
+ * 阶段 3(当前）：集成线程池，实现 Reactor/Proactor 模式
  *
  * 核心流程：
  *   浏览器请求 → read_once() → process() →
@@ -83,7 +83,6 @@ const char* HttpConnection::get_mime_type(const char* url)
     if (strcasecmp(dot, ".xml")   == 0) return "text/xml";
 
     return "text/plain";
-    
 }
 
 
@@ -133,6 +132,9 @@ void HttpConnection::init_request()
     linger_         = false;
     method_         = GET;
     check_state_    = CHECK_STATE_REQUESTLINE;
+    m_state         = 0;       // 重置任务类型
+    improv          = 0;       // 重置同步标志
+    timer_flag      = 0;       // 重置定时器标志
 
     memset(read_buf_,  '\0', READ_BUFFER_SIZE);
     memset(write_buf_, '\0', WRITE_BUFFER_SIZE);
