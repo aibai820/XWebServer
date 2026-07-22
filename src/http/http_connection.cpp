@@ -311,7 +311,8 @@ HttpConnection::HTTP_CODE HttpConnection::parse_request_line(char* text)
     version_ += strspn(version_, " \t");
     
     // 只接受 HTTP/1.1
-    if (strcasecmp(version_, "HTTP/1.1") != 0) {
+    if (strcasecmp(version_, "HTTP/1.1") != 0 &&
+        strcasecmp(version_, "HTTP/1.0") != 0) {
         return BAD_REQUEST;
     }
     
@@ -723,6 +724,9 @@ bool HttpConnection::write()
     // 循环发送，直到缓冲区满或全部发完
     while (true)
     {
+        printf("\n========== Response ==========\n");
+        fwrite(write_buf_, 1, write_idx_, stdout);
+        printf("==============================\n");
         temp = writev(sockfd_, iv_, iv_count_);
 
         if (temp < 0)
