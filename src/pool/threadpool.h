@@ -201,7 +201,7 @@ bool ThreadPool<T>::append(T* request, int state)
     // 队列满了就不让加（简单拒绝策略）
     if (m_workqueue.size() >= static_cast<size_t>(m_max_requests))
     {
-        m_queuelocker,unlock();
+        m_queuelocker.unlock();
         return false;
     }
     
