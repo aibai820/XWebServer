@@ -2,7 +2,7 @@
 
 > 从零开始构建的高并发 C++ Web 服务器 —— 基于 epoll + 线程池 + 非阻塞 IO
 >
-> 部署平台：NVIDIA Jetson Xavier NX (ARM64, Ubuntu 18.04/20.04)
+> 部署平台：NVIDIA Jetson Xavier NX (ARM64, Ubuntu 20.04 LTS)
 
 ---
 
@@ -25,7 +25,7 @@
 
 ### 环境要求
 - **硬件**: NVIDIA Jetson Xavier NX (或任何 ARM64 / x86_64 Linux)
-- **系统**: Ubuntu 18.04+ (JetPack 4.x+)
+- **系统**: Ubuntu 20.04 LTS（JetPack 5 默认）
 - **工具**: g++ 7+, cmake 3.10+, make
 
 ```bash
