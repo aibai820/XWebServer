@@ -48,8 +48,7 @@ Log::Log()
 //      简化处理：进程退出时 OS 回收所有内存
 // 这是一个简化的析构，生产环境可以用引用计数或 shared_ptr 改进。
 // ============================================================
-Log::~Log() 
-{
+Log::~Log() {
     if (m_fp != nullptr) {
         fclose(m_fp);
         m_fp = nullptr;
@@ -68,8 +67,8 @@ Log::~Log()
 //   6. 打开文件（追加模式）
 // ============================================================
 bool Log::init(const char* file_name, int close_log,
-               int log_buf_size, int split_lines, int max_queue_size)
-{
+               int log_buf_size, int split_lines, int max_queue_size) {
+
     // ---- 第 1 步：异步模式初始化 ----
     // max_queue_size >= 1 → 启用异步日志
     // max_queue_size == 0 → 同步日志（默认）
@@ -90,7 +89,7 @@ bool Log::init(const char* file_name, int close_log,
     }
 
     // ---- 第 2 步：保存配置 ----
-    m_close_log = close_log;
+    m_close_log   = close_log;
 
     // 分配内部格式化缓冲区
     m_log_buf_size = log_buf_size;
@@ -102,8 +101,8 @@ bool Log::init(const char* file_name, int close_log,
     // ---- 第 3 步：解析文件路径 ----
     // 获取当前时间（用于日志文件名中的日期前缀）
     time_t t = time(nullptr);
-    struct tm* sys_tm = localtime(&t);
-    struct tm my_tm = *sys_tm;   // 拷贝到局部变量，因为 localtime 返回静态缓冲区
+    struct tm my_tm;
+    localtime_r(&t, &my_tm);   
 
     char log_full_name[256] = {0};
 
@@ -151,21 +150,24 @@ bool Log::init(const char* file_name, int close_log,
 // ============================================================
 // write_log(): 写入一条日志
 //
-// 流程：
-//   1. 获取当前时间（精确到微秒）
-//   2. 根据 level 确定级别字符串（[debug]/[info]/[warn]/[erro]）
-//   3. 检查是否需要滚动日志文件（按天 / 按行数）
-//   4. 格式化日志内容（时间 + 级别 + 用户消息）
-//   5. 异步模式：push 到阻塞队列；同步模式：直接 fputs
+// 锁策略（生产级改进）：
+//   - 格式化（vsnprintf）在锁外执行：不阻塞其他线程的 I/O
+//   - 旋转检查 + 写盘在锁内执行：消除 TOCTOU 竞态
+//   - 异步 push 在锁外执行：队列有自己的互斥锁，无需持有 m_mutex
+//
+// 与 TinyWebServer 原版的区别：
+//   原版：lock→旋转→unlock→lock→格式化→unlock→lock→写盘→unlock
+//   改进：格式化→lock→(旋转+写盘)→unlock→push(异步)
+//   优势：一次持锁完成写操作，不会出现"旋转后 m_fp 被其他线程关闭"的竞态
 // ============================================================
-void Log::write_log(int level, const char* format, ...)
-{
+void Log::write_log(int level, const char* format, ...) {
     // ---- 获取高精度时间 ----
     struct timeval now = {0, 0};
-    gettimeofday(&now, nullptr); // 精确到微秒
+    gettimeofday(&now, nullptr);          // 精确到微秒
     time_t t = now.tv_sec;
     struct tm* sys_tm = localtime(&t);
     struct tm my_tm = *sys_tm;
+
     // ---- 级别字符串 ----
     char s[16] = {0};
     switch (level) {
@@ -186,7 +188,42 @@ void Log::write_log(int level, const char* format, ...)
         break;
     }
 
-    // ---- 日志滚动检查（需要互斥保护） ----
+    // ---- 格式化日志内容（锁外执行）----
+    // vsnprintf 格式化用户消息，可能较慢（复杂格式字符串），
+    // 在锁外执行避免阻塞其他写日志的线程。
+    // 使用栈缓冲区，不依赖共享的 m_buf。
+    va_list valst;
+    va_start(valst, format);
+
+    char temp_buf[4096];
+    int n = snprintf(temp_buf, 48, "%d-%02d-%02d %02d:%02d:%02d.%06ld %s ",
+                     my_tm.tm_year + 1900, my_tm.tm_mon + 1,
+                     my_tm.tm_mday,
+                     my_tm.tm_hour, my_tm.tm_min, my_tm.tm_sec,
+                     now.tv_usec, s);
+    int m = vsnprintf(temp_buf + n, sizeof(temp_buf) - n - 1, format, valst);
+
+    if (m < 0)
+    {
+        m = 0;
+    }
+
+    if (n + m >= (int)sizeof(temp_buf) - 2)
+    {
+        m = sizeof(temp_buf) - n - 2;
+    }
+
+    temp_buf[n + m]     = '\n';
+    temp_buf[n + m + 1] = '\0';
+    std::string log_str = temp_buf;
+
+    va_end(valst);
+
+    // ---- 持锁：旋转检查 + 写盘（原子操作）----
+    // 从旋转检查到实际写盘之间不释放锁，消除 TOCTOU 竞态：
+    //   旧代码：线程A unlock 后线程B 可能触发旋转关闭了 m_fp，
+    //          线程A 再次 lock 时拿着悬空的 FILE* 写数据
+    //   新代码：旋转检查和写盘在同一次持锁中完成
     m_mutex.lock();
     m_count++;
 
@@ -228,44 +265,21 @@ void Log::write_log(int level, const char* format, ...)
 
         // 打开新文件
         m_fp = fopen(new_log, "a");
+        if (m_fp == nullptr)
+        {
+            m_mutex.unlock();
+            return;
+        }
     }
 
-    // ---- 格式化日志内容 ----
-    va_list valst;
-    va_start(valst, format);
-
-    std::string log_str;
-
-    m_mutex.lock();
-
-    // 时间戳部分：YYYY-MM-DD HH:MM:SS.mmmmmm [级别]:
-    // 占用约 48 字节
-    int n = snprintf(m_buf, 48, "%d-%02d-%02d %02d:%02d:%02d.%06ld %s ",
-                     my_tm.tm_year + 1900, my_tm.tm_mon + 1,
-                     my_tm.tm_mday,
-                     my_tm.tm_hour, my_tm.tm_min, my_tm.tm_sec,
-                     now.tv_usec, s);
-
-    // 用户消息部分（格式化）
-    int m = vsnprintf(m_buf + n, m_log_buf_size - n - 1, format, valst);
-
-    // 追加换行符和 NUL 终止符
-    // 示例最终字符串: "2026-07-22 14:35:12.123456 [info]: Server started\n"
-    m_buf[n + m]     = '\n';
-    m_buf[n + m + 1] = '\0';
-    log_str = m_buf;
-
-    m_mutex.unlock();
-
-    va_end(valst);
-
-    // ---- 输出日志 ----
-    if (m_is_async && !m_log_queue->full()) {
-        // 异步模式：推入队列，后台线程负责写盘
+    // 写盘（仍在锁内——和旋转检查是原子的）
+    if (m_is_async && m_log_queue && !m_log_queue->full()) {
+        // 异步模式：释放锁后 push（队列有自己的互斥锁，
+        // push 不需要持有 Log::m_mutex）
+        m_mutex.unlock();
         m_log_queue->push(log_str);
     } else {
-        // 同步模式（或异步队列已满回退同步）：直接写入文件
-        m_mutex.lock();
+        // 同步模式（或异步队列已满回退同步）：持锁写盘
         fputs(log_str.c_str(), m_fp);
         m_mutex.unlock();
     }

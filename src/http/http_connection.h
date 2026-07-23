@@ -32,7 +32,7 @@
 #include <cerrno>
 #include <map>
 #include <string>
-
+#include "locker.h"
 
 #ifdef HAVE_MYSQL
 #include <mysql/mysql.h>
@@ -173,6 +173,11 @@ public:
     int improv = 0;       // 同步标志：工作线程处理完毕后设为 1，主线程据此判断是否完成
     int timer_flag = 0;   // 定时器标志：1=连接已断开/出错，需要清理（阶段 4 使用）
 
+    
+    // 阶段 4: 数据库连接指针（由线程池通过 connectionRAII 获取并设置，
+    //         供 do_request() 中 CGI 处理使用）
+    MYSQL* mysql_ = nullptr;
+
 private:
     // ---- 内部辅助：重置请求状态 ----
     void init_request();
@@ -259,7 +264,6 @@ private:
     char  sql_user_[100]   = {};   // MySQL 用户名（从 WebServer 传入）
     char  sql_passwd_[100] = {};   // MySQL 密码
     char  sql_dbname_[100] = {};   // MySQL 数据库名
-    MYSQL* mysql_       = nullptr; // 当前请求的 MySQL 连接（由线程池 RAII 获取）
 
     // 静态用户凭据缓存
     static std::map<std::string, std::string> users_;  // username → password

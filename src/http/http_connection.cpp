@@ -381,6 +381,7 @@ HttpConnection::HTTP_CODE HttpConnection::parse_request_line(char* text)
     // 找版本号的起始位置（URL 后的空白）
     version_ = strpbrk(url_, " \t");
     if (!version_) {
+
         return BAD_REQUEST;
     }
     *version_++ = '\0';  // 把空格变成 \0，url_ 就是纯 URL
@@ -438,7 +439,6 @@ HttpConnection::HTTP_CODE HttpConnection::parse_headers(char* text)
             check_state_ = CHECK_STATE_CONTENT;
             return NO_REQUEST;
         }
-        
         // 否则请求完整
         return GET_REQUEST;
     }
@@ -522,6 +522,7 @@ HttpConnection::HTTP_CODE HttpConnection::process_read()
            ((line_status = parse_line()) == LINE_OK))
     {
         text = get_line();
+
         start_line_ = checked_idx_;
 
         switch (check_state_)
@@ -587,8 +588,7 @@ HttpConnection::HTTP_CODE HttpConnection::process_read()
 //   - 登录 (2CGISQL.cgi): 解析 POST body → 在 users_ map 中验证 → 返回结果页
 //   - 注册 (3CGISQL.cgi): 解析 POST body → 检查重复 → INSERT 到 MySQL + 更新 map
 // ============================================================
-HttpConnection::HTTP_CODE HttpConnection::do_request()
-{
+HttpConnection::HTTP_CODE HttpConnection::do_request() {
     // 构建实际文件路径（首先填充 doc_root）
     strncpy(real_file_, doc_root_, FILENAME_LEN - 1);
     int root_len = strlen(doc_root_);
@@ -713,6 +713,30 @@ HttpConnection::HTTP_CODE HttpConnection::do_request()
         real_file_[FILENAME_LEN - 1] = '\0';
     }
     // ============================================================
+    // 默认首页：/ → judge.html（如果存在），否则 index.html
+    //
+    // 注意：这个判断必须在 "else if (last_slash)" 之前！
+    // 因为 strrchr("/", '/') 返回非空指针，如果先判断 last_slash，
+    // "/" 会被 switch 的 default 分支当静态路径处理，永远到不了这里。
+    //
+    // judge.html 是 CGI 功能的入口页面，提供"新用户"和"已有账户"按钮。
+    // 如果 judge.html 不存在（例如未配置数据库的部署），
+    // 回退到 index.html 基础页面。
+    // ============================================================
+    else if (strlen(url_) == 1 && url_[0] == '/') {
+        // 先尝试 judge.html
+        strncpy(real_file_ + root_len, "/judge.html",
+                FILENAME_LEN - root_len - 1);
+
+        // 如果 judge.html 不存在，回退到 index.html
+        struct stat judge_stat;
+        if (stat(real_file_, &judge_stat) < 0) {
+            strncpy(real_file_ + root_len, "/index.html",
+                    FILENAME_LEN - root_len - 1);
+        }
+        real_file_[FILENAME_LEN - 1] = '\0';
+    }
+    // ============================================================
     // 短 URL 路由（非 CGI POST，或 GET 请求）
     //
     // 这是 TinyWebServer 的一个特殊设计：URL 路径为单字符时
@@ -752,26 +776,6 @@ HttpConnection::HTTP_CODE HttpConnection::do_request()
             strncpy(real_file_ + root_len, url_,
                     FILENAME_LEN - root_len - 1);
             break;
-        }
-        real_file_[FILENAME_LEN - 1] = '\0';
-    }
-    // ============================================================
-    // 默认首页：/ → judge.html（如果存在），否则 index.html
-    //
-    // judge.html 是 CGI 功能的入口页面，提供"新用户"和"已有账户"按钮。
-    // 如果 judge.html 不存在（例如未配置数据库的部署），
-    // 回退到 index.html 基础页面。
-    // ============================================================
-    else if (strlen(url_) == 1 && url_[0] == '/') {
-        // 先尝试 judge.html
-        strncpy(real_file_ + root_len, "/judge.html",
-                FILENAME_LEN - root_len - 1);
-
-        // 如果 judge.html 不存在，回退到 index.html
-        struct stat judge_stat;
-        if (stat(real_file_, &judge_stat) < 0) {
-            strncpy(real_file_ + root_len, "/index.html",
-                    FILENAME_LEN - root_len - 1);
         }
         real_file_[FILENAME_LEN - 1] = '\0';
     }

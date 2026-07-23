@@ -59,7 +59,7 @@
 #endif
 
 #ifndef MYSQL_PASSWD
-#define MYSQL_PASSWD   "root"
+#define MYSQL_PASSWD   "123456"
 #endif
 
 #ifndef MYSQL_DBNAME
@@ -211,18 +211,23 @@ int main(int argc, char* argv[]) {
     server.trig_mode();
 
     // ---- 第 3 步：初始化日志系统 ----
+    printf("A\n");
     server.log_write();
 
     // ---- 第 4 步：初始化数据库连接池 + 加载用户凭据 ----
+    printf("B\n");
     server.sql_pool();
 
     // ---- 第 5 步：创建线程池 ----
+    printf("C\n");
     server.thread_pool();
 
     // ---- 第 6 步：创建 socket + epoll + 信号 + 定时器 ----
+    printf("D\n");
     server.event_listen();
 
     // ---- 第 7 步：进入主事件循环（阻塞直到 SIGTERM）----
+    printf("E\n");
     server.event_loop();
 
     // 优雅退出：WebServer 析构函数自动清理所有资源

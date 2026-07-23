@@ -134,6 +134,44 @@ void WebServer::init(int port, const char* doc_root, int trig_mode,
 }
 
 // ============================================================
+// trig_mode(): 拆分 trig_mode_ 为监听和连接两种触发模式
+//
+// trig_mode_ 与 listen/conn 触发模式的映射：
+//   0 → LT + LT  (默认)
+//   1 → LT + ET  (推荐生产使用)
+//   2 → ET + LT
+//   3 → ET + ET  (极致性能)
+// ============================================================
+void WebServer::trig_mode() {
+    switch (trig_mode_) {
+    case 0:  // LT + LT
+        listen_trig_mode_ = LT_MODE;
+        conn_trig_mode_   = LT_MODE;
+        break;
+    case 1:  // LT + ET
+        listen_trig_mode_ = LT_MODE;
+        conn_trig_mode_   = ET_MODE;
+        break;
+    case 2:  // ET + LT
+        listen_trig_mode_ = ET_MODE;
+        conn_trig_mode_   = LT_MODE;
+        break;
+    case 3:  // ET + ET
+        listen_trig_mode_ = ET_MODE;
+        conn_trig_mode_   = ET_MODE;
+        break;
+    default: // 未知 → 默认 LT + LT
+        listen_trig_mode_ = LT_MODE;
+        conn_trig_mode_   = LT_MODE;
+        break;
+    }
+
+    const char* listen_str = (listen_trig_mode_ == ET_MODE) ? "ET" : "LT";
+    const char* conn_str   = (conn_trig_mode_ == ET_MODE)   ? "ET" : "LT";
+    printf("[触发模式] 监听=%s, 连接=%s\n", listen_str, conn_str);
+}
+
+// ============================================================
 // log_write(): 初始化日志系统
 //
 // 同步模式 (log_write_ == 0)：每条日志直接 fputs + fflush
