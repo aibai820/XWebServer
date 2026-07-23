@@ -11,7 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # ============================================================
 # 编译选项
 # ============================================================
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # 生成 compile_commands.json (给 clangd/LSP 用)
+# 生成 compile_commands.json (给 clangd/LSP 用)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 平台检测：Jetson 是 ARM64
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
@@ -38,17 +39,38 @@ add_compile_options(${COMMON_FLAGS})
 # pthread：POSIX 线程（Linux 上通常需要显式链接）
 find_package(Threads REQUIRED)
 
-# MySQL 可选（阶段 4 才用到，先注释掉）
-# find_package(PkgConfig)
-# pkg_check_modules(MYSQL REQUIRED mysqlclient)
+# MySQL 客户端库（阶段 4 启用）
+# 使用 PkgConfig 查找 mysqlclient
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(MYSQL mysqlclient)
+endif()
+
+if(MYSQL_FOUND)
+    message(STATUS "找到 MySQL 客户端库: ${MYSQL_LIBRARIES}")
+    message(STATUS "  MySQL 包含目录: ${MYSQL_INCLUDE_DIRS}")
+    add_definitions(-DHAVE_MYSQL)
+else()
+    message(WARNING "=============================================")
+    message(WARNING "  未找到 MySQL 客户端库 (mysqlclient)")
+    message(WARNING "  CGI 登录/注册功能将不可用")
+    message(WARNING "  服务器仍可正常提供静态文件服务")
+    message(WARNING "  安装 MySQL 开发库:")
+    message(WARNING "    Ubuntu: sudo apt install libmysqlclient-dev")
+    message(WARNING "    Jetson: sudo apt install libmysqlclient-dev")
+    message(WARNING "=============================================")
+endif()
 
 # ============================================================
-# 源文件
+# 源文件（阶段 4：新增 timer/log/sql_connection_pool）
 # ============================================================
 set(SOURCES
     src/main.cpp
     src/server.cpp
     src/http/http_connection.cpp
+    src/timer/timer.cpp                  # 阶段 4 新增：定时器模块
+    src/log/log.cpp                      # 阶段 4 新增：日志系统
+    src/pool/sql_connection_pool.cpp     # 阶段 4 新增：数据库连接池
 )
 
 set(HEADERS
@@ -56,6 +78,10 @@ set(HEADERS
     src/http/http_connection.h
     src/sync/locker.h
     src/pool/threadpool.h
+    src/pool/sql_connection_pool.h       # 阶段 4 新增
+    src/timer/timer.h                    # 阶段 4 新增
+    src/log/log.h                        # 阶段 4 新增
+    src/log/block_queue.h               # 阶段 4 新增
 )
 
 # ============================================================
@@ -63,14 +89,26 @@ set(HEADERS
 # ============================================================
 add_executable(webserver ${SOURCES} ${HEADERS})
 
+# 包含目录
 target_include_directories(webserver PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/http
+    ${CMAKE_SOURCE_DIR}/src/pool
+    ${CMAKE_SOURCE_DIR}/src/timer       # 阶段 4 新增
+    ${CMAKE_SOURCE_DIR}/src/log         # 阶段 4 新增
+    ${CMAKE_SOURCE_DIR}/src/sync
 )
 
+# 链接库
 target_link_libraries(webserver PRIVATE
     Threads::Threads
-    # ${MYSQL_LIBRARIES}  # 阶段 4 启用
 )
+
+# MySQL 库（可选：如果找到则链接）
+if(MYSQL_FOUND)
+    target_include_directories(webserver PRIVATE ${MYSQL_INCLUDE_DIRS})
+    target_link_libraries(webserver PRIVATE ${MYSQL_LIBRARIES})
+endif()
 
 # ============================================================
 # 安装

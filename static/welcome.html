@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>欢迎 - My WebServer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 48px 40px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            max-width: 400px;
+            width: 90%;
+        }
+        h1 { font-size: 28px; color: #333; margin-bottom: 8px; }
+        p.subtitle { color: #888; font-size: 14px; margin-bottom: 32px; }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            margin: 12px 0;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            color: white;
+        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15); }
+        .btn-pic   { background: linear-gradient(135deg, #ffecd2, #fcb69f); color: #a0522d; }
+        .btn-video { background: linear-gradient(135deg, #a18cd1, #fbc2eb); color: #4a2d6e; }
+        .btn-fans  { background: linear-gradient(135deg, #fbc2eb, #ff9a9e); color: #8b2252; }
+        .btn-logout { background: #eee; color: #888; margin-top: 24px; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎉 欢迎回来！</h1>
+        <p class="subtitle">登录成功 — 选择以下内容浏览</p>
+
+        <form action="5" method="post">
+            <button type="submit" class="btn btn-pic">🖼️ 图片</button>
+        </form>
+
+        <form action="6" method="post">
+            <button type="submit" class="btn btn-video">🎬 视频</button>
+        </form>
+
+        <form action="7" method="post">
+            <button type="submit" class="btn btn-fans">⭐ 关注我</button>
+        </form>
+
+        <a href="/" class="btn btn-logout">退出登录</a>
+    </div>
+</body>
+</html>

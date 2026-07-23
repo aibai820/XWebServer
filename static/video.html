@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频 - My WebServer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px;
+        }
+        h1 { color: #333; margin-bottom: 24px; }
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            max-width: 800px;
+            width: 100%;
+            text-align: center;
+        }
+        video { max-width: 100%; border-radius: 8px; }
+        a { display: inline-block; margin-top: 24px; color: #667eea; text-decoration: none; font-weight: 600; }
+        a:hover { color: #764ba2; }
+    </style>
+</head>
+<body>
+    <h1>🎬 视频播放</h1>
+    <div class="container">
+        <video controls width="100%">
+            <source src="test.mp4" type="video/mp4">
+            您的浏览器不支持 HTML5 视频播放。
+        </video>
+        <p style="margin-top:16px; color:#888;">
+            放入 test.mp4 文件到 static/ 目录即可播放视频<br>
+            Phase 4 生产级服务器 — 支持大文件 HTTP Range 请求
+        </p>
+    </div>
+    <a href="/welcome.html">← 返回</a>
+</body>
+</html>

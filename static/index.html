@@ -2,10 +2,11 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>My WebServer — Phase 2</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My WebServer — Phase 4</title>
     <style>
         body {
-            font-family: 'Segoe UI', sans-serif;
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             max-width: 720px;
             margin: 60px auto;
             padding: 0 20px;
@@ -17,6 +18,7 @@
             border-bottom: 2px solid #30363d;
             padding-bottom: 12px;
         }
+        h2 { color: #58a6ff; margin-top: 32px; }
         .status { color: #3fb950; font-weight: bold; }
         code {
             background: #161b22;
@@ -31,43 +33,43 @@
             padding: 16px 20px;
             margin: 20px 0;
         }
-        .feature-list {
-            list-style: none;
-            padding: 0;
-        }
-        .feature-list li {
-            padding: 6px 0;
-        }
-        .feature-list li::before {
-            content: "✅ ";
-        }
+        .feature-list { list-style: none; padding: 0; }
+        .feature-list li { padding: 6px 0; }
+        .feature-list li::before { content: "✅ "; }
+        .feature-list li.phase4::before { content: "🆕 "; }
         pre {
             background: #161b22;
             border-radius: 6px;
             padding: 12px 16px;
             overflow-x: auto;
         }
+        .new { color: #d2a8ff; }
     </style>
 </head>
 <body>
     <h1>🚀 My WebServer</h1>
-    <p class="status">● 服务器运行中 — Phase 2: HTTP 静态文件服务器</p>
+    <p class="status">● 服务器运行中 — Phase 4: 生产级高并发 HTTP 服务器</p>
 
     <div class="info">
-        <p>这是一个练习项目，正在逐步构建一个高并发 C++ Web 服务器。</p>
-        <p>当前阶段：<strong>HTTP/1.1 静态文件服务器</strong></p>
+        <p>从零构建的 C++ 高并发 Web 服务器，复刻 <a href="https://github.com/qinguoyi/TinyWebServer" style="color:#58a6ff;">TinyWebServer</a>。</p>
         <p>部署平台：<strong>NVIDIA Jetson Xavier NX (ARM64)</strong></p>
+        <p>技术栈：<strong>epoll + 线程池 + 非阻塞 IO + 定时器 + 异步日志 + MySQL</strong></p>
     </div>
 
     <h2>已实现功能</h2>
     <ul class="feature-list">
-        <li>HTTP/1.1 协议解析（状态机：请求行 → 头部 → 正文）</li>
-        <li>mmap 零拷贝文件映射</li>
-        <li>writev 分散/聚集 I/O</li>
+        <li>epoll I/O 多路复用（LT / ET / EPOLLONESHOT）</li>
+        <li>HTTP/1.1 协议解析（主-从状态机）</li>
+        <li>mmap 零拷贝 + writev 分散/聚集 I/O</li>
+        <li>线程池（生产者-消费者 + Reactor/Proactor）</li>
         <li>长连接 keep-alive 支持</li>
-        <li>MIME 类型自动识别</li>
+        <li>MIME 类型自动识别（16 种）</li>
         <li>错误页面（400 / 403 / 404 / 500）</li>
-        <li>LT / ET 触发模式切换</li>
+        <li class="phase4"><span class="new">定时器：有序双向链表 + 15s 超时断开 + SIGALRM 心跳</span></li>
+        <li class="phase4"><span class="new">异步日志：阻塞队列 + 后台线程 + 按天/按行滚动</span></li>
+        <li class="phase4"><span class="new">统一事件源：socketpair 信号桥接</span></li>
+        <li class="phase4"><span class="new">数据库连接池：RAII + 单例 + 信号量控制</span></li>
+        <li class="phase4"><span class="new">CGI 登录/注册：MySQL 后端 + 内存缓存</span></li>
     </ul>
 
     <h2>测试命令</h2>
@@ -80,11 +82,14 @@ curl -v http://localhost:9006/index.html
 # 404 测试
 curl -v http://localhost:9006/nonexistent.html
 
-# keep-alive 测试
-curl -v -H "Connection: keep-alive" http://localhost:9006/</code></pre>
+# 压力测试（需要安装 wrk）
+wrk -t4 -c100 -d10s http://localhost:9006/
+
+# 并发连接测试
+ab -n 10000 -c 100 http://localhost:9006/</code></pre>
 
     <p style="margin-top:40px; color:#484f58; font-size:0.85em;">
-        Built with ♥ on Jetson Xavier NX
+        Phase 4 — Built with ♥ on Jetson Xavier NX
     </p>
 </body>
 </html>

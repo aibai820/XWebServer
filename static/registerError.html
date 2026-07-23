@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注册失败 - My WebServer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #eff6ff;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 48px 40px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+            max-width: 400px;
+            width: 90%;
+            border: 2px solid #dbeafe;
+        }
+        .icon { font-size: 64px; margin-bottom: 16px; }
+        h1 { font-size: 22px; color: #2563eb; margin-bottom: 8px; }
+        p { color: #888; font-size: 14px; margin-bottom: 24px; line-height: 1.6; }
+        a {
+            display: inline-block;
+            padding: 12px 32px;
+            background: #3b82f6;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        a:hover { transform: translateY(-2px); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">⚠️</div>
+        <h1>注册失败</h1>
+        <p>用户名已被占用，或数据库错误。<br>请尝试其他用户名。</p>
+        <a href="/">返回首页</a>
+    </div>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>关注 - My WebServer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #ffecd2, #fcb69f);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 48px 40px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+            max-width: 500px;
+            width: 90%;
+        }
+        .icon { font-size: 72px; margin-bottom: 16px; }
+        h1 { font-size: 24px; color: #333; margin-bottom: 8px; }
+        p { color: #888; font-size: 14px; margin: 12px 0; line-height: 1.6; }
+        .links { margin-top: 24px; }
+        .links a {
+            display: inline-block;
+            padding: 10px 24px;
+            margin: 6px;
+            border-radius: 8px;
+            background: #333;
+            color: white;
+            text-decoration: none;
+            font-size: 13px;
+            transition: transform 0.2s;
+        }
+        .links a:hover { transform: translateY(-2px); }
+        .back { display: block; margin-top: 24px; color: #a0522d; text-decoration: none; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">⭐</div>
+        <h1>感谢关注！</h1>
+        <p>My WebServer — 从零构建的生产级 C++ HTTP 服务器</p>
+        <p>基于 epoll + 线程池 + 非阻塞 IO + 定时器 + 异步日志</p>
+        <div class="links">
+            <a href="https://github.com/qinguoyi/TinyWebServer" target="_blank">原项目 TinyWebServer</a>
+        </div>
+        <p style="margin-top: 16px; color: #aaa; font-size: 12px;">
+            Jetson Xavier NX (ARM64) | C++17 | 高并发 10,000+
+        </p>
+        <a href="/welcome.html" class="back">← 返回</a>
+    </div>
+</body>
+</html>

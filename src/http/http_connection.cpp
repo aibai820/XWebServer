@@ -16,10 +16,16 @@
  */
 
 #include "http_connection.h"
+#include "../pool/sql_connection_pool.h"
+#include "../log/log.h"
 
 // 静态成员变量定义（在 .cpp 中定义，.h 中声明）
 int HttpConnection::epoll_fd_ = -1;
 int HttpConnection::user_count_ = 0;
+
+// 阶段 4: 用户凭据缓存（从 MySQL 加载）
+std::map<std::string, std::string> HttpConnection::users_;
+MutexLock HttpConnection::users_lock_;
 
 // ============================================================
 // HTTP 响应状态信息
@@ -50,8 +56,65 @@ const char* error_500_form  =
     "<p>There was an unusual problem serving the request.</p>"
     "</body></html>";
 
+// ============================================================
+// initmysql_result(): 从 MySQL 加载用户凭据到内存 map
+//
+// 服务器启动时调用一次。使用 RAII 从连接池获取连接，
+// 执行 SELECT 查询，将 (username, password) 对存入 users_ map。
+// 之后的登录验证只需查内存 map（O(log n)），无需访问数据库。
+// 注册时先查 map 防重复，再 INSERT 到 MySQL 并同步更新 map。
+//
+// 安全注意：
+//   - 生产环境中密码应存储哈希值（如 bcrypt/argon2），而非明文
+//   - 这里为教学目的简化，使用明文存储
+// ============================================================
+#ifdef HAVE_MYSQL
+void HttpConnection::initmysql_result(connection_pool* connPool) {
+    // RAII 获取数据库连接（离开作用域自动归还）
+    MYSQL* mysql = nullptr;
+    connectionRAII mysqlcon(&mysql, connPool);
 
-    // ============================================================
+    if (mysql == nullptr) {
+        LOG_ERROR("[CGI] 无法获取数据库连接，用户凭据加载失败");
+        return;
+    }
+
+    // 查询 user 表中的所有用户名和密码
+    if (mysql_query(mysql, "SELECT username,passwd FROM user")) {
+        LOG_ERROR("[CGI] SELECT 查询失败: %s", mysql_error(mysql));
+        return;
+    }
+
+    // 存储查询结果
+    MYSQL_RES* result = mysql_store_result(mysql);
+    if (result == nullptr) {
+        LOG_ERROR("[CGI] mysql_store_result 失败: %s", mysql_error(mysql));
+        return;
+    }
+
+    // 遍历结果集，加载到 users_ map
+    int num_rows = mysql_num_rows(result);
+    while (MYSQL_ROW row = mysql_fetch_row(result)) {
+        if (row[0] && row[1]) {
+            std::string username(row[0]);
+            std::string passwd(row[1]);
+            users_[username] = passwd;
+        }
+    }
+
+    mysql_free_result(result);
+
+    LOG_INFO("[CGI] 已加载 %d 个用户凭据到内存缓存", num_rows);
+}
+#else
+// MySQL 不可用时的空实现
+void HttpConnection::initmysql_result(connection_pool* connPool) {
+    (void)connPool;
+    LOG_WARN("[CGI] MySQL 客户端库不可用，用户凭据缓存为空");
+}
+#endif
+
+// ============================================================
 // MIME 类型映射
 // 根据文件扩展名返回对应的 Content-Type
 // ============================================================
@@ -90,12 +153,23 @@ const char* HttpConnection::get_mime_type(const char* url)
 // 公共接口：初始化连接
 // ============================================================
 void HttpConnection::init(int sockfd, const sockaddr_in& addr,
-                          const char* doc_root, int trig_mode) 
+                          const char* doc_root, int trig_mode,
+                          int close_log,
+                          const char* sql_user,
+                          const char* sql_passwd,
+                          const char* sql_dbname)
 {
     sockfd_   = sockfd;
     address_  = addr;
     doc_root_ = doc_root;
     trig_mode_ = trig_mode;
+
+    // 阶段 4: 存储 MySQL 凭据（后续 CGI 处理时使用）
+    if (sql_user && sql_user[0] != '\0') {
+        strncpy(sql_user_, sql_user, sizeof(sql_user_) - 1);
+        strncpy(sql_passwd_, sql_passwd, sizeof(sql_passwd_) - 1);
+        strncpy(sql_dbname_, sql_dbname, sizeof(sql_dbname_) - 1);
+    }
 
     // 注册到 epoll（one_shot 防止多线程竞争，Phase 3 用到）
     add_fd_to_epoll(epoll_fd_, sockfd_, true, trig_mode_);
@@ -135,6 +209,9 @@ void HttpConnection::init_request()
     m_state         = 0;       // 重置任务类型
     improv          = 0;       // 重置同步标志
     timer_flag      = 0;       // 重置定时器标志
+    cgi_            = 0;       // 重置 CGI 标志
+    post_body_      = nullptr; // 重置 POST 正文指针
+    mysql_          = nullptr; // 重置 MySQL 连接指针（由线程池 RAII 管理）
 
     memset(read_buf_,  '\0', READ_BUFFER_SIZE);
     memset(write_buf_, '\0', WRITE_BUFFER_SIZE);
@@ -280,11 +357,10 @@ HttpConnection::HTTP_CODE HttpConnection::parse_request_line(char* text)
 {
     // 找 URL 的起始位置（方法名后的空白）
     url_ = strpbrk(text, " \t");
-    if (!url_)
-    {
+    if (!url_) {
         return BAD_REQUEST;
     }
-    *url_++ = '\0';  // 把空格变成 \0，text 就是纯方法名 
+    *url_++ = '\0';  // 把空格变成 \0，text 就是纯方法名
 
     // 解析方法
     char* method_str = text;
@@ -292,30 +368,31 @@ HttpConnection::HTTP_CODE HttpConnection::parse_request_line(char* text)
         method_ = GET;
     } else if (strcasecmp(method_str, "POST") == 0) {
         method_ = POST;
+        cgi_    = 1;     // POST 请求启用 CGI 处理
     } else {
-        // 阶段 2 只支持 GET
+        // 不支持的方法（HEAD/PUT/DELETE 等）
+        LOG_WARN("[HTTP] 不支持的方法: %s (fd=%d)", method_str, sockfd_);
         return BAD_REQUEST;
     }
 
     // 跳过 URL 前的空白
     url_ += strspn(url_, " \t");
-    
+
     // 找版本号的起始位置（URL 后的空白）
     version_ = strpbrk(url_, " \t");
     if (!version_) {
         return BAD_REQUEST;
     }
     *version_++ = '\0';  // 把空格变成 \0，url_ 就是纯 URL
-    
+
     // 跳过版本号前的空白
     version_ += strspn(version_, " \t");
-    
+
     // 只接受 HTTP/1.1
-    if (strcasecmp(version_, "HTTP/1.1") != 0 &&
-        strcasecmp(version_, "HTTP/1.0") != 0) {
+    if (strcasecmp(version_, "HTTP/1.1") != 0) {
         return BAD_REQUEST;
     }
-    
+
     // 处理带 http:// 或 https:// 前缀的 URL（代理请求可能这样）
     if (strncasecmp(url_, "http://", 7) == 0) {
         url_ += 7;
@@ -325,25 +402,15 @@ HttpConnection::HTTP_CODE HttpConnection::parse_request_line(char* text)
         url_ += 8;
         url_ = strchr(url_, '/');
     }
-    
+
     // URL 必须以 / 开头
     if (!url_ || url_[0] != '/') {
         return BAD_REQUEST;
     }
 
-    // 默认访问 index.html
-    if (strlen(url_) == 1 && url_[0] == '/') {
-        // url_ 指向 read_buf_，不能直接赋值字符串
-        // 用 strcat 追加在 / 后面（注意：strcat 需要目标内存有 \0）
-        // 这里 "/" 只占 1 字节 + \0，后面紧跟 parse 时的 \0
-        // 实际上需要确保缓冲区足够大。Phase 2 简单处理：
-        // 重新指定 url_ 到一个默认页面
-        static char default_url[] = "/index.html";
-        // 我们不能修改 url_ 指针指向静态内存，因为后续 parse_headers
-        // 会用到 read_buf_ 中的内容，这里留作练习。
-        // 简化方案：在 do_request() 中处理 "/" → "/index.html" 的转换
-    }
-    
+    // 默认首页 "/" → 在 do_request() 中处理，先尝试 judge.html，
+    // 不存在则回退到 index.html（阶段 4 引入 CGI 后可路由到导航页）
+
     // 进入下一个状态：解析头部
     check_state_ = CHECK_STATE_HEADER;
     return NO_REQUEST;
@@ -408,15 +475,24 @@ HttpConnection::HTTP_CODE HttpConnection::parse_headers(char* text)
 
 // ============================================================
 // 解析 HTTP 正文（POST 请求的消息体）
-// 阶段 2 不做详细解析，只判断是否收取完
-// 阶段 4 会实现完整的 CGI 处理
+//
+// POST 请求中，正文通常包含表单数据，格式为:
+//   user=myusername&password=mypassword
+//
+// 阶段 4 完整实现 CGI 处理：
+//   收到完整正文后，保存 post_body_ 指针供 do_request() 解析。
+//   正文被截断为一个 C 字符串（末尾添加 \0）。
 // ============================================================
 HttpConnection::HTTP_CODE HttpConnection::parse_content(char* text)
 {
     // 判断正文是否完整接收
-    if (read_idx_ >= (content_length_ + checked_idx_))
-    {
-        text[content_length_] = '\0'; // 截断正文
+    // read_idx_ = 已读取的总字节数
+    // checked_idx_ = 已解析的字节数（请求行 + 头部）
+    // content_length_ = Content-Length 声明的正文长度
+    if (read_idx_ >= (content_length_ + checked_idx_)) {
+        text[content_length_] = '\0';   // 截断正文为 C 字符串
+        post_body_ = text;              // 保存正文指针，供 do_request() 解析
+        LOG_DEBUG("[HTTP] fd=%d POST body: %s", sockfd_, post_body_);
         return GET_REQUEST;
     }
     return NO_REQUEST;
@@ -493,63 +569,255 @@ HttpConnection::HTTP_CODE HttpConnection::process_read()
 // ============================================================
 // URL 路由 + 文件映射
 //
-// 1. 拼接 doc_root + url → 真实文件路径
-// 2. 默认 "/" → "/index.html"
-// 3. stat() 判断文件是否存在、是否有权限、是否为目录
-// 4. open() + mmap() 零拷贝映射到内存
+// 阶段 2：纯静态文件路由
+// 阶段 4 新增：CGI 登录/注册 + 短 URL 路由
+//
+// 路由表：
+//   /0              → register.html     (新用户注册页面)
+//   /1              → log.html           (已有账户登录页面)
+//   /2CGISQL.cgi    → CGI 登录校验      (POST: user=xxx&password=yyy)
+//   /3CGISQL.cgi    → CGI 注册处理      (POST: user=xxx&password=yyy)
+//   /5              → picture.html       (图片页面)
+//   /6              → video.html         (视频页面)
+//   /7              → fans.html          (关注页面)
+//   /               → judge.html 或 index.html
+//   其他             → 作为静态文件路径
+//
+// CGI 处理逻辑：
+//   - 登录 (2CGISQL.cgi): 解析 POST body → 在 users_ map 中验证 → 返回结果页
+//   - 注册 (3CGISQL.cgi): 解析 POST body → 检查重复 → INSERT 到 MySQL + 更新 map
 // ============================================================
 HttpConnection::HTTP_CODE HttpConnection::do_request()
 {
-    // 构建实际文件路径
+    // 构建实际文件路径（首先填充 doc_root）
     strncpy(real_file_, doc_root_, FILENAME_LEN - 1);
     int root_len = strlen(doc_root_);
 
-    // 默认首页：/ → /index.html
-    const char* target_url = url_;
-    if (strlen(target_url) == 1 && target_url[0] == '/')
-    {
-        target_url = "/index.html";
+    // 获取 URL 最后一个路径组件（用于短 URL 路由检测）
+    const char* last_slash = strrchr(url_, '/');
+    char flag = (last_slash && *(last_slash + 1)) ? *(last_slash + 1) : '\0';
+
+    // ============================================================
+    // CGI 处理：登录校验 / 注册处理
+    //
+    // 只有 POST 请求才走 CGI 逻辑（GET 请求直接当静态文件处理）
+    // URL 格式：
+    //   /2CGISQL.cgi  → 登录（flag = '2'）
+    //   /3CGISQL.cgi  → 注册（flag = '3'）
+    // POST body 格式：user=USERNAME&password=PASSWORD
+    // ============================================================
+    if (cgi_ == 1 && post_body_ && last_slash && (flag == '2' || flag == '3')) {
+
+        // ---- 解析 POST body: user=name&password=pass ----
+        char name[100]     = {0};
+        char password[100] = {0};
+
+        // 提取用户名: "user=" 之后到 "&" 之前
+        int i = 0;
+        for (i = 5; post_body_[i] != '&' && post_body_[i] != '\0'; ++i) {
+            name[i - 5] = post_body_[i];
+        }
+        name[i - 5] = '\0';
+
+        // 提取密码: "&password=" 之后到结尾
+        // "user=xxx&password=yyy" → password 从 &password= 之后开始
+        // &password= 共 10 个字符
+        if (post_body_[i] == '&') {
+            int j = 0;
+            for (i = i + 10; post_body_[i] != '\0'; ++i, ++j) {
+                password[j] = post_body_[i];
+            }
+            password[j] = '\0';
+        }
+
+        LOG_INFO("[CGI] fd=%d %s: user='%s'",
+                 sockfd_, (flag == '3') ? "注册" : "登录", name);
+
+        // ---- 注册 (3CGISQL.cgi) ----
+        if (flag == '3') {
+            // 检查用户名是否已存在（在内存 map 中查）
+            if (users_.find(name) == users_.end()) {
+#ifdef HAVE_MYSQL
+                // 用户名不重复 → 插入到 MySQL 数据库
+
+                // RAII 获取数据库连接
+                MYSQL* mysql = nullptr;
+                connection_pool* pool = connection_pool::GetInstance();
+                connectionRAII mysqlcon(&mysql, pool);
+
+                if (mysql == nullptr) {
+                    strncpy(real_file_ + root_len, "/registerError.html",
+                            FILENAME_LEN - root_len - 1);
+                } else {
+                    // 构建 INSERT 语句
+                    // 注意：实际生产环境应使用参数化查询（prepared statement）防 SQL 注入
+                    char sql_insert[256];
+                    snprintf(sql_insert, sizeof(sql_insert),
+                             "INSERT INTO user(username, passwd) VALUES('%s','%s')",
+                             name, password);
+
+                    // 加锁保护 users_ map 的并发访问
+                    users_lock_.lock();
+                    int res = mysql_query(mysql, sql_insert);
+                    users_lock_.unlock();
+
+                    if (!res) {
+                        // 插入成功 → 同步更新内存 map
+                        users_lock_.lock();
+                        users_.insert(std::make_pair(std::string(name),
+                                                      std::string(password)));
+                        users_lock_.unlock();
+
+                        // 注册成功 → 跳转到登录页面
+                        strncpy(real_file_ + root_len, "/log.html",
+                                FILENAME_LEN - root_len - 1);
+                        LOG_INFO("[CGI] fd=%d 注册成功: user='%s'", sockfd_, name);
+                    } else {
+                        // 插入失败
+                        strncpy(real_file_ + root_len, "/registerError.html",
+                                FILENAME_LEN - root_len - 1);
+                        LOG_ERROR("[CGI] fd=%d 注册失败(MySQL): user='%s' error='%s'",
+                                  sockfd_, name, mysql_error(mysql));
+                    }
+                }
+#else
+                // MySQL 不可用 → 注册功能禁用
+                strncpy(real_file_ + root_len, "/registerError.html",
+                        FILENAME_LEN - root_len - 1);
+                LOG_WARN("[CGI] fd=%d 注册失败(MySQL不可用): user='%s'", sockfd_, name);
+#endif
+            } else {
+                // 用户名已存在
+                strncpy(real_file_ + root_len, "/registerError.html",
+                        FILENAME_LEN - root_len - 1);
+                LOG_WARN("[CGI] fd=%d 注册失败(重复): user='%s'", sockfd_, name);
+            }
+        }
+        // ---- 登录 (2CGISQL.cgi) ----
+        else if (flag == '2') {
+            // 在内存 map 中验证用户名和密码
+            auto it = users_.find(name);
+            if (it != users_.end() && it->second == password) {
+                // 登录成功 → 跳转到欢迎页面
+                strncpy(real_file_ + root_len, "/welcome.html",
+                        FILENAME_LEN - root_len - 1);
+                LOG_INFO("[CGI] fd=%d 登录成功: user='%s'", sockfd_, name);
+            } else {
+                // 用户名不存在或密码不匹配
+                strncpy(real_file_ + root_len, "/logError.html",
+                        FILENAME_LEN - root_len - 1);
+                LOG_WARN("[CGI] fd=%d 登录失败: user='%s'", sockfd_, name);
+            }
+        }
+
+        real_file_[FILENAME_LEN - 1] = '\0';
+    }
+    // ============================================================
+    // 短 URL 路由（非 CGI POST，或 GET 请求）
+    //
+    // 这是 TinyWebServer 的一个特殊设计：URL 路径为单字符时
+    // 用作"动作标识符"（action flag），映射到不同的 HTML 页面。
+    // 这些标识符来自 judge.html 和 welcome.html 中的表单 action。
+    //
+    //   0 → register.html      (新用户注册)
+    //   1 → log.html            (已有账户登录)
+    //   5 → picture.html        (图片页面)
+    //   6 → video.html          (视频页面)
+    //   7 → fans.html           (关注页面)
+    // ============================================================
+    else if (last_slash) {
+        switch (flag) {
+        case '0':   // 新用户 → 注册页面
+            strncpy(real_file_ + root_len, "/register.html",
+                    FILENAME_LEN - root_len - 1);
+            break;
+        case '1':   // 已有账户 → 登录页面
+            strncpy(real_file_ + root_len, "/log.html",
+                    FILENAME_LEN - root_len - 1);
+            break;
+        case '5':   // 图片
+            strncpy(real_file_ + root_len, "/picture.html",
+                    FILENAME_LEN - root_len - 1);
+            break;
+        case '6':   // 视频
+            strncpy(real_file_ + root_len, "/video.html",
+                    FILENAME_LEN - root_len - 1);
+            break;
+        case '7':   // 关注
+            strncpy(real_file_ + root_len, "/fans.html",
+                    FILENAME_LEN - root_len - 1);
+            break;
+        default:
+            // 非路由 URL，作为普通静态文件路径处理
+            strncpy(real_file_ + root_len, url_,
+                    FILENAME_LEN - root_len - 1);
+            break;
+        }
+        real_file_[FILENAME_LEN - 1] = '\0';
+    }
+    // ============================================================
+    // 默认首页：/ → judge.html（如果存在），否则 index.html
+    //
+    // judge.html 是 CGI 功能的入口页面，提供"新用户"和"已有账户"按钮。
+    // 如果 judge.html 不存在（例如未配置数据库的部署），
+    // 回退到 index.html 基础页面。
+    // ============================================================
+    else if (strlen(url_) == 1 && url_[0] == '/') {
+        // 先尝试 judge.html
+        strncpy(real_file_ + root_len, "/judge.html",
+                FILENAME_LEN - root_len - 1);
+
+        // 如果 judge.html 不存在，回退到 index.html
+        struct stat judge_stat;
+        if (stat(real_file_, &judge_stat) < 0) {
+            strncpy(real_file_ + root_len, "/index.html",
+                    FILENAME_LEN - root_len - 1);
+        }
+        real_file_[FILENAME_LEN - 1] = '\0';
+    }
+    // ============================================================
+    // 其他：作为普通静态文件路径
+    // ============================================================
+    else {
+        strncpy(real_file_ + root_len, url_,
+                FILENAME_LEN - root_len - 1);
+        real_file_[FILENAME_LEN - 1] = '\0';
     }
 
-    // 安全拼接（防止缓冲区溢出）
-    strncpy(real_file_ + root_len, target_url,
-            FILENAME_LEN - root_len - 1);
-    real_file_[FILENAME_LEN - 1] = '\0';
+    LOG_DEBUG("[请求] fd=%d  URL: %s → 文件: %s", sockfd_, url_, real_file_);
 
-    printf("[请求] fd=%d URL: %s → 文件: %s\n", sockfd_, target_url, real_file_);
-
-    // stat() 获取文件信息
+    // ---- stat() 获取文件信息 ----
     if (stat(real_file_, &file_stat_) < 0) {
         return NO_RESOURCE;  // 文件不存在 → 404
     }
-    
-    // 检查是否有读取权限
+
+    // ---- 检查是否有读取权限（other 可读） ----
     if (!(file_stat_.st_mode & S_IROTH)) {
         return FORBIDDEN_REQUEST;  // 无权限 → 403
     }
-    
-    // 目录不允许直接访问
+
+    // ---- 目录不允许直接访问 ----
     if (S_ISDIR(file_stat_.st_mode)) {
         return BAD_REQUEST;  // 是目录 → 400
     }
 
-    // mmap 零拷贝：把文件映射到内存
-    // MAP_PRIVATE: 写时复制（虽然这里是只读）
+    // ---- mmap 零拷贝：把文件映射到内存 ----
+    // MAP_PRIVATE: 写时复制（虽然这里是只读访问）
     int fd = open(real_file_, O_RDONLY);
-    if (fd < 0)
-    {
+    if (fd < 0) {
+        LOG_ERROR("[HTTP] fd=%d 无法打开文件: %s (%s)", sockfd_, real_file_, strerror(errno));
         return INTERNAL_ERROR;
     }
     file_addr_ = (char*)mmap(nullptr, file_stat_.st_size,
                              PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd); // mmap 后可以立即关闭文件描述符
+    close(fd);  // mmap 后可以立即关闭文件描述符（映射仍然有效）
 
-    if (file_addr_ == MAP_FAILED)
-    {
+    if (file_addr_ == MAP_FAILED) {
         file_addr_ = nullptr;
+        LOG_ERROR("[HTTP] fd=%d mmap 失败: %s", sockfd_, strerror(errno));
         return INTERNAL_ERROR;
     }
-    
+
     return FILE_REQUEST;
 }
 
@@ -724,9 +992,6 @@ bool HttpConnection::write()
     // 循环发送，直到缓冲区满或全部发完
     while (true)
     {
-        printf("\n========== Response ==========\n");
-        fwrite(write_buf_, 1, write_idx_, stdout);
-        printf("==============================\n");
         temp = writev(sockfd_, iv_, iv_count_);
 
         if (temp < 0)

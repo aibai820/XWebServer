@@ -5,11 +5,13 @@
  * 阶段 1（已完成）：简单的 echo——收到什么返回什么
  * 阶段 2（已完成）：完整的 HTTP/1.1 协议解析 + 静态文件服务
  * 阶段 3（已完成）：集成线程池，实现 Reactor/Proactor 模式
+ * 阶段 4（已完成）：CGI 登录/注册 + MySQL 数据库集成 + 定时器协同
  *
  * 关键设计：
  *   - 每个连接有一个独立对象，状态全部自包含
  *   - m_epollfd 是静态成员，所有连接共享同一个 epoll 实例
  *   - m_user_count 是静态成员，跟踪全局活跃连接数
+ *   - users_ 是静态成员，缓存数据库中的用户凭据（避免每次查 DB）
  */
 #ifndef XWEBSERVER_HTTP_CONNECTION_H
 #define XWEBSERVER_HTTP_CONNECTION_H
@@ -28,6 +30,16 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <cerrno>
+#include <map>
+#include <string>
+
+
+#ifdef HAVE_MYSQL
+#include <mysql/mysql.h>
+#else
+struct MYSQL;
+#endif
+
 
 // ============================================================
 // 常量定义
@@ -36,6 +48,8 @@ constexpr int READ_BUFFER_SIZE  = 2048;   // 读缓冲区大小
 constexpr int WRITE_BUFFER_SIZE = 1024;   // 写缓冲区大小
 constexpr int FILENAME_LEN      = 200;    // 文件路径最大长度
 
+// 前置声明：避免循环依赖
+class connection_pool;
 
 class HttpConnection
 {
@@ -91,9 +105,17 @@ public:
     // @param addr       客户端地址
     // @param doc_root   文档根目录（静态文件路径）
     // @param TRIGMode   触发模式：0=LT, 1=ET
+    // @param close_log  是否关闭日志：0=启用, 1=禁用（默认 1，向后兼容）
+    // @param sql_user   MySQL 用户名（默认空，阶段 4/CGI 使用）
+    // @param sql_passwd MySQL 密码（默认空）
+    // @param sql_dbname MySQL 数据库名（默认空）
     // ----------------------------------------------------------
     void init(int sockfd, const sockaddr_in& addr,
-              const char* doc_root, int TRIGMode);
+              const char* doc_root, int TRIGMode,
+              int close_log = 1,
+              const char* sql_user = "",
+              const char* sql_passwd = "",
+              const char* sql_dbname = "");
 
     // 关闭连接：从 epoll 移除、close socket、活跃连接数 -1
     void close_conn();
@@ -123,6 +145,26 @@ public:
     // 访问器
     int sockfd() const { return sockfd_; }
     const sockaddr_in& address() const{ return address_; }
+
+    // ==========================================================
+    // 用户凭据缓存（阶段 4：CGI 登录/注册）
+    //
+    // 服务器启动时从 MySQL user 表加载全部用户名和密码到内存。
+    // 登录验证直接查内存 map，避免每次都查数据库。
+    // 注册时先查内存 map（防重复），再 INSERT 到 MySQL
+    // 并同步更新 map（保证一致性）。
+    // ==========================================================
+
+    /**
+     * @brief 从 MySQL 加载用户凭据到内存 map
+     *
+     * 服务器启动时调用一次（由 WebServer::sql_pool() 触发）。
+     * 使用 RAII 获取数据库连接，执行 SELECT username,passwd FROM user，
+     * 将结果存入静态成员 users_ map。
+     *
+     * @param connPool  数据库连接池单例指针
+     */
+    static void initmysql_result(connection_pool* connPool);
 
     // ==========================================================
     // 线程池协同字段（阶段 3）
@@ -209,6 +251,19 @@ private:
     const char* doc_root_ = "static";        // 文档根目录
     int  trig_mode_ = 0;                     // 触发模式：0=LT, 1=ET
 
+    // ==========================================================
+    // CGI / POST 支持（阶段 4 新增）
+    // ==========================================================
+    int   cgi_        = 0;          // 是否启用 CGI 处理：0=否(GET), 1=是(POST)
+    char* post_body_  = nullptr;    // POST 请求正文指针（指向 read_buf_ 中 content 起始位置）
+    char  sql_user_[100]   = {};   // MySQL 用户名（从 WebServer 传入）
+    char  sql_passwd_[100] = {};   // MySQL 密码
+    char  sql_dbname_[100] = {};   // MySQL 数据库名
+    MYSQL* mysql_       = nullptr; // 当前请求的 MySQL 连接（由线程池 RAII 获取）
+
+    // 静态用户凭据缓存
+    static std::map<std::string, std::string> users_;  // username → password
+    static MutexLock users_lock_;                       // 保护 users_ 的并发访问
 };
 
 // ============================================================
